@@ -1,0 +1,13 @@
+[package]
+
+name = "ld34"
+version = "0.0.0"
+authors = ["David LeGare <excaliburhissheath@gmail.com>"]
+
+[lib]
+name = "ld34"
+crate-type = ["dylib", "rlib"]
+
+[dependencies]
+gunship = { version = "*", path = "gunship-rs", features = [] }
+loader  = { version = "*", path = "gunship-rs/lib/loader" }

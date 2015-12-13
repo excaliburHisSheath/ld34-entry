@@ -9,5 +9,5 @@ name = "ld34"
 crate-type = ["dylib", "rlib"]
 
 [dependencies]
-gunship = { version = "*", path = "gunship-rs", features = [] }
+gunship = { version = "*", path = "gunship-rs", features = ["hotloading"] }
 loader  = { version = "*", path = "gunship-rs/lib/loader" }

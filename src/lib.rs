@@ -50,7 +50,9 @@ game_setup! {
             grid: HashMap::new(),
             selected: GridPos::new(0, 0),
             cursor: Point::new(0.0, 0.0, 0.0),
-        })
+            resource_count: 10,
+        }),
+        UnitManager => UnitManager::new()
 
     systems:
         manager_update
@@ -61,8 +63,25 @@ game_setup! {
 }
 
 fn scene_setup(scene: &Scene) {
+    // Instantiate any models.
+    let base_entity = scene.instantiate_model("cube");
+
     let mut transform_manager = scene.get_manager_mut::<TransformManager>();
+    let mut game_manager = scene.get_manager_mut::<GameManager>();
     let camera_manager = scene.get_manager::<CameraManager>();
+    let light_manager = scene.get_manager::<LightManager>();
+    let unit_manager = scene.get_manager::<UnitManager>();
+
+    // Create light.
+    {
+        let light_entity = scene.create_entity();
+        let mut light_transform = transform_manager.assign(light_entity);
+        light_transform.set_position(Point::new(0.0, 0.0, 10.0));
+
+        light_manager.assign(light_entity, Light::Point(PointLight {
+            position: Point::origin()
+        }));
+    }
 
     // Create camera.
     let camera_entity = scene.create_entity();
@@ -74,11 +93,25 @@ fn scene_setup(scene: &Scene) {
         camera_manager.assign(camera_entity, Camera::default());
     }
 
+    // Setup main base.
+    {
+        // Add to the grid for future looooookups.
+        game_manager.grid.insert(GridPos::new(0, 0), base_entity);
 
+        unit_manager.assign(base_entity, PlayerUnit::Base { level: 1 });
+
+        let mut base_transform = transform_manager.get_mut(base_entity);
+        base_transform.set_position(GridPos::new(0, 0).cell_center());
+        base_transform.set_scale(Vector3::new(
+            1.0 * CELL_SIZE * BASE_SCALE_PER_LEVEL,
+            1.0 * CELL_SIZE * BASE_SCALE_PER_LEVEL,
+            1.0 * CELL_SIZE * BASE_SCALE_PER_LEVEL));
+    }
 }
 
 const CELL_SIZE: f32 = 5.0;
 const MOUSE_SPEED: f32 = 0.1;
+const BASE_SCALE_PER_LEVEL: f32 = 0.1;
 
 type GameManager = SingletonComponentManager<GameData>;
 
@@ -93,6 +126,8 @@ pub struct GameData {
     /// The position in world space of the game cursor. Used to move the selected grid cell in
     /// discrete increments.
     cursor: Point,
+
+    resource_count: usize,
 }
 
 /// Represents a coordinate in the the 2D game grid.
@@ -122,12 +157,25 @@ impl GridPos {
     }
 
     fn to_world(&self) -> Point {
-        Point::new(self.x as f32 * CELL_SIZE, self.y as f32 * CELL_SIZE, 0.0)
+        Point::new(
+            self.x as f32 * CELL_SIZE,
+            self.y as f32 * CELL_SIZE,
+            0.0)
+    }
+
+    fn cell_center(&self) -> Point {
+        Point::new(
+            self.x as f32 * CELL_SIZE + CELL_SIZE * 0.5,
+            self.y as f32 * CELL_SIZE + CELL_SIZE * 0.5,
+            0.0)
     }
 }
 
 fn manager_update(scene: &Scene, delta: f32) {
     let mut game_manager = scene.get_manager_mut::<GameManager>();
+    let mut game_manager = &mut **game_manager; // Deref twice to get from Ref<Ref<GameData>> to &GameData.
+    let unit_manager = scene.get_manager::<UnitManager>();
+    let transform_manager = scene.get_manager::<TransformManager>();
 
     // Handle mouse movement to move the cursor and selected grid cell.
     {
@@ -147,4 +195,37 @@ fn manager_update(scene: &Scene, delta: f32) {
 
         debug_draw::box_min_max(min, max);
     }
+
+    // Handle mouse input.
+    if scene.input.mouse_button_pressed(1) && game_manager.resource_count > 0 {
+        // Find element in grid cell.
+        if let Some(entity) = game_manager.grid.get(&game_manager.selected) {
+            let entity = *entity;
+            match *unit_manager.get_mut(entity).unwrap() {
+                PlayerUnit::Base { ref mut level } => {
+                    // Update level.
+                    *level += 1;
+                    game_manager.resource_count -= 1;
+
+                    // Update the base's scale.
+                    let mut base_transform = transform_manager.get_mut(entity);
+                    base_transform.set_scale(Vector3::new(
+                        *level as f32 * CELL_SIZE * BASE_SCALE_PER_LEVEL,
+                        *level as f32 * CELL_SIZE * BASE_SCALE_PER_LEVEL,
+                        *level as f32 * CELL_SIZE * BASE_SCALE_PER_LEVEL));
+                },
+                PlayerUnit::Turret => {},
+            }
+        }
+    }
 }
+
+#[derive(Debug, Clone)]
+enum PlayerUnit {
+    Base {
+        level: usize,
+    },
+    Turret,
+}
+
+type UnitManager = StructComponentManager<PlayerUnit>;

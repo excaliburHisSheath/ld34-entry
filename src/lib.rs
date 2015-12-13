@@ -4,6 +4,7 @@ extern crate gunship;
 
 use gunship::*;
 use std::collections::HashMap;
+use std::ops::Sub;
 
 pub fn do_main() {
     let mut engine = Engine::new();
@@ -87,7 +88,7 @@ fn scene_setup(scene: &Scene) {
     let camera_entity = scene.create_entity();
     {
         let mut camera_transform = transform_manager.assign(camera_entity);
-        camera_transform.set_position(Point::new(0.0, 0.0, 30.0));
+        camera_transform.set_position(Point::new(0.0, 0.0, CAMERA_BASE_OFFSET));
         camera_transform.look_at(Point::new(0.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0));
 
         camera_manager.assign(camera_entity, Camera::default());
@@ -112,6 +113,10 @@ fn scene_setup(scene: &Scene) {
 const CELL_SIZE: f32 = 5.0;
 const MOUSE_SPEED: f32 = 0.1;
 const BASE_SCALE_PER_LEVEL: f32 = 0.1;
+const CAMERA_BASE_OFFSET: f32 = 30.0;
+const CAMERA_OFFSET_PER_CURSOR_OFFSET: f32 = 5.0;
+const CAMERA_XY_MOVE_SPEED: f32 = 5.0;
+const CAMERA_Z_MOVE_SPEED: f32 = 2.0;
 
 type GameManager = SingletonComponentManager<GameData>;
 
@@ -171,11 +176,23 @@ impl GridPos {
     }
 }
 
+impl Sub for GridPos {
+    type Output = GridPos;
+
+    fn sub(self, rhs: GridPos) -> GridPos {
+        GridPos {
+            x: self.x - rhs.x,
+            y: self.y - rhs.y,
+        }
+    }
+}
+
 fn manager_update(scene: &Scene, delta: f32) {
     let mut game_manager = scene.get_manager_mut::<GameManager>();
-    let mut game_manager = &mut **game_manager; // Deref twice to get from Ref<Ref<GameData>> to &GameData.
+    let mut game_manager = &mut **game_manager; // Deref twice to get from Ref<SingletonComponentManager<GameData>> to &GameData.
     let unit_manager = scene.get_manager::<UnitManager>();
     let transform_manager = scene.get_manager::<TransformManager>();
+    let camera_manager = scene.get_manager::<CameraManager>();
 
     // Handle mouse movement to move the cursor and selected grid cell.
     {
@@ -184,8 +201,8 @@ fn manager_update(scene: &Scene, delta: f32) {
         game_manager.selected = GridPos::from_world(game_manager.cursor);
     }
 
-    // Visualize cursor.
-    debug_draw::sphere(game_manager.cursor, 0.25);
+    // // Visualize cursor.
+    // debug_draw::sphere(game_manager.cursor, 0.25);
 
     // Draw the selected world point.
     // TODO: Do this with a real wireframe or something, not debug drawing.
@@ -217,6 +234,33 @@ fn manager_update(scene: &Scene, delta: f32) {
                 PlayerUnit::Turret => {},
             }
         }
+    }
+
+    // Move the camera to follow the cursor selection.
+    for (_, camera_entity) in camera_manager.iter() {
+        let mut camera_transform = transform_manager.get_mut(camera_entity);
+        let camera_pos = camera_transform.position();
+        let (mut camera_xy, camera_z) = (Vector2::new(camera_pos.x, camera_pos.y), camera_pos.z);
+
+        // Lerp camera x,z towards the center of the selected grid cell.
+        let grid_center = game_manager.selected.cell_center();
+        camera_xy = Vector2::lerp(
+            CAMERA_XY_MOVE_SPEED * delta,
+            camera_xy,
+            Vector2::new(grid_center.x, grid_center.y));
+
+        // Move camera back based on manhattan distance between cursor and player's base.
+        let cursor_offset = GridPos::new(0, 0) - game_manager.selected;
+        let camera_z = f32::lerp(
+            CAMERA_Z_MOVE_SPEED * delta,
+            camera_z,
+            CAMERA_BASE_OFFSET + f32::abs((cursor_offset.x + cursor_offset.y) as f32) * CAMERA_OFFSET_PER_CURSOR_OFFSET);
+
+        camera_transform.set_position(Point::new(
+            camera_xy.x,
+            camera_xy.y,
+            camera_z,
+        ));
     }
 }
 

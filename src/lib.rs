@@ -15,6 +15,7 @@ pub fn do_main() {
 macro_rules! game_setup {
     (
         setup: $setup:ident,
+        always: $always:ident,
 
         managers:
         $($manager:ty => $manager_instance:expr),*
@@ -33,18 +34,22 @@ macro_rules! game_setup {
             $(engine.scene().resource_manager().load_resource_file($model).unwrap();)*
 
             $setup(engine.scene_mut());
+            $always(engine.scene_mut());
         }
 
         #[no_mangle]
         pub fn game_reload(old_engine: &Engine, engine: &mut Engine) {
-            $(engine.scene_mut().reload_manager::<$manager>(old_engine.scene());)*
+            $(engine.scene_mut().reload_manager_or_default::<$manager>(old_engine.scene(), $manager_instance);)*
             $(engine.register_system($system_instance);)*
+
+            $always(engine.scene_mut());
         }
     }
 }
 
 game_setup! {
     setup: scene_setup,
+    always: scene_reset,
 
     managers:
         GameManager => GameManager::new(GameData {
@@ -53,10 +58,12 @@ game_setup! {
             cursor: Point::new(0.0, 0.0, 0.0),
             resource_count: 10,
         }),
-        UnitManager => UnitManager::new()
+        UnitManager => UnitManager::new(),
+        EnemyManager => EnemyManager::new()
 
     systems:
-        manager_update
+        manager_update,
+        enemy_update
 
     models:
         "meshes/cube.dae",
@@ -72,6 +79,7 @@ fn scene_setup(scene: &Scene) {
     let camera_manager = scene.get_manager::<CameraManager>();
     let light_manager = scene.get_manager::<LightManager>();
     let unit_manager = scene.get_manager::<UnitManager>();
+    let collider_manager = scene.get_manager::<ColliderManager>();
 
     // Create light.
     {
@@ -107,6 +115,27 @@ fn scene_setup(scene: &Scene) {
             1.0 * CELL_SIZE * BASE_SCALE_PER_LEVEL,
             1.0 * CELL_SIZE * BASE_SCALE_PER_LEVEL,
             1.0 * CELL_SIZE * BASE_SCALE_PER_LEVEL));
+
+        collider_manager.assign(base_entity, Collider::Box {
+            offset: Vector3::zero(),
+            widths: Vector3::one(),
+        });
+    }
+}
+
+fn scene_reset(scene: &Scene) {
+    let enemy_manager = scene.get_manager::<EnemyManager>();
+    let collider_manager = scene.get_manager::<ColliderManager>();
+    let alarm_manager = scene.get_manager::<AlarmManager>();
+
+    // Register callbacks to patch things up after hotloading.
+    collider_manager.register_callback(on_enemy_collision);
+    alarm_manager.register_callback(spawn_enemy);
+    alarm_manager.register_callback(fire_turret);
+
+    println!("num enemies: {}", enemy_manager.len());
+    if enemy_manager.len() < MIN_ENEMY_COUNT {
+        alarm_manager.assign(scene.create_entity(), ENEMY_SPAWN_DELAY, spawn_enemy);
     }
 }
 
@@ -190,9 +219,11 @@ impl Sub for GridPos {
 fn manager_update(scene: &Scene, delta: f32) {
     let mut game_manager = scene.get_manager_mut::<GameManager>();
     let mut game_manager = &mut **game_manager; // Deref twice to get from Ref<SingletonComponentManager<GameData>> to &GameData.
+    let mut transform_manager = scene.get_manager_mut::<TransformManager>();
     let unit_manager = scene.get_manager::<UnitManager>();
-    let transform_manager = scene.get_manager::<TransformManager>();
     let camera_manager = scene.get_manager::<CameraManager>();
+    let mesh_manager = scene.get_manager::<MeshManager>();
+    let alarm_manager = scene.get_manager::<AlarmManager>();
 
     // Handle mouse movement to move the cursor and selected grid cell.
     {
@@ -214,7 +245,30 @@ fn manager_update(scene: &Scene, delta: f32) {
     }
 
     // Handle mouse input.
-    if scene.input.mouse_button_pressed(1) && game_manager.resource_count > 0 {
+    if game_manager.resource_count > 0 && scene.input.mouse_button_pressed(0) {
+        // let selected = game_manager.selected;
+
+        if !game_manager.grid.contains_key(&game_manager.selected) {
+            let unit_entity = scene.create_entity();
+
+            // Setup components.
+            let mut transform = transform_manager.assign(unit_entity);
+            transform.set_position(game_manager.selected.cell_center());
+            transform.set_scale(Vector3::new(0.5, 0.5, 1.0));
+            mesh_manager.assign(unit_entity, "pCube1-lib");
+            let alarm_id = alarm_manager.assign_repeating(unit_entity, TURRET_FIRE_INTERVAL, fire_turret);
+            unit_manager.assign(unit_entity, PlayerUnit::Turret {
+                level: 1,
+                shoot_alarm: alarm_id,
+                target: None,
+            });
+
+            game_manager.grid.insert(game_manager.selected, unit_entity);
+            game_manager.resource_count -= 1;
+        }
+    }
+
+    if game_manager.resource_count > 0 && scene.input.mouse_button_pressed(1) {
         // Find element in grid cell.
         if let Some(entity) = game_manager.grid.get(&game_manager.selected) {
             let entity = *entity;
@@ -231,7 +285,12 @@ fn manager_update(scene: &Scene, delta: f32) {
                         *level as f32 * CELL_SIZE * BASE_SCALE_PER_LEVEL,
                         *level as f32 * CELL_SIZE * BASE_SCALE_PER_LEVEL));
                 },
-                PlayerUnit::Turret => {},
+                PlayerUnit::Turret { ref mut level, shoot_alarm: _, target: _ } => {
+                    *level += 1;
+                    game_manager.resource_count -= 1;
+
+                    // TODO: Adjust the turret based on its new level.
+                },
             }
         }
     }
@@ -254,7 +313,7 @@ fn manager_update(scene: &Scene, delta: f32) {
         let camera_z = f32::lerp(
             CAMERA_Z_MOVE_SPEED * delta,
             camera_z,
-            CAMERA_BASE_OFFSET + f32::abs((cursor_offset.x + cursor_offset.y) as f32) * CAMERA_OFFSET_PER_CURSOR_OFFSET);
+            CAMERA_BASE_OFFSET + (cursor_offset.x.abs() + cursor_offset.y.abs()) as f32 * CAMERA_OFFSET_PER_CURSOR_OFFSET);
 
         camera_transform.set_position(Point::new(
             camera_xy.x,
@@ -264,12 +323,129 @@ fn manager_update(scene: &Scene, delta: f32) {
     }
 }
 
+const TURRET_FIRE_INTERVAL: f32 = 1.0;
+
 #[derive(Debug, Clone)]
 enum PlayerUnit {
     Base {
         level: usize,
     },
-    Turret,
+    Turret {
+        level: usize,
+        shoot_alarm: AlarmId,
+        target: Option<Entity>,
+    },
 }
 
 type UnitManager = StructComponentManager<PlayerUnit>;
+
+fn fire_turret(scene: &Scene, turret_entity: Entity) {
+    let mut transform_manager = scene.get_manager_mut::<TransformManager>();
+    let enemy_manager = scene.get_manager::<EnemyManager>();
+    let unit_manager = scene.get_manager::<UnitManager>();
+
+    let mut turret = unit_manager.get_mut(turret_entity);
+
+    // If the turret already has a target then shoot at that target. Unless that target is dead.
+    // How do we get notified when the target is destroyed.
+}
+
+#[derive(Debug, Clone)]
+struct Bullet {
+    speed: f32,
+}
+
+type BulletManager = StructComponentManager<Bullet>;
+
+#[derive(Debug, Clone)]
+struct Enemy;
+
+type EnemyManager = StructComponentManager<Enemy>;
+
+const MIN_ENEMY_COUNT: usize = 5;
+const ENEMY_SPAWN_DELAY: f32 = 1.0;
+const ENEMY_RADIUS: f32 = 1.0;
+
+fn enemy_update(scene: &Scene, delta: f32) {
+    const ENEMY_MOVE_SPEED: f32 = 1.0;
+
+    let transform_manager = scene.get_manager::<TransformManager>();
+    let enemy_manager = scene.get_manager::<EnemyManager>();
+
+    for (_, enemy_entity) in enemy_manager.iter() {
+        let mut enemy_transform = transform_manager.get_mut(enemy_entity);
+
+        // Move enemies zombie-style towards the player's base.
+        let move_dir = GridPos::new(0, 0).cell_center() - enemy_transform.position();
+        let move_dir = move_dir.normalized();
+
+        enemy_transform.translate(move_dir * ENEMY_MOVE_SPEED * delta);
+    }
+}
+
+fn spawn_enemy(scene: &Scene, entity: Entity) {
+    let mut transform_manager = scene.get_manager_mut::<TransformManager>();
+    let alarm_manager = scene.get_manager::<AlarmManager>();
+    let enemy_manager = scene.get_manager::<EnemyManager>();
+    let mesh_manager = scene.get_manager::<MeshManager>();
+    let collider_manager = scene.get_manager::<ColliderManager>();
+
+    let mut transform = transform_manager.assign(entity);
+    let position = Point::new(
+        random::range(-5.0, 5.0) * CELL_SIZE,
+        random::range(5.0, 10.0) * CELL_SIZE,
+        0.0
+    );
+    transform.set_position(position);
+    transform.set_scale(Vector3::new(ENEMY_RADIUS, ENEMY_RADIUS, ENEMY_RADIUS));
+    mesh_manager.assign(entity, "pSphere1-lib");
+    enemy_manager.assign(entity, Enemy);
+    collider_manager.assign(entity, Collider::Sphere {
+        offset: Vector3::zero(),
+        radius: ENEMY_RADIUS,
+    });
+    collider_manager.assign_callback(entity, on_enemy_collision);
+
+    if enemy_manager.len() < MIN_ENEMY_COUNT {
+        alarm_manager.assign(scene.create_entity(), ENEMY_SPAWN_DELAY, spawn_enemy);
+    }
+}
+
+fn on_enemy_collision(scene: &Scene, enemy_entity: Entity, others: &[Entity]) {
+    let alarm_manager = scene.get_manager::<AlarmManager>();
+    let enemy_manager = scene.get_manager::<EnemyManager>();
+
+    for other in others.iter().cloned() {
+        // Ignore collisions between two enemies.
+        if enemy_manager.get(other).is_some() {
+            continue;
+        }
+
+        // TODO: Check if the other entity is a player unit. If so we damage it.
+
+        // TODO: Check if the other entity is a player's bullet. If so damage the enemy.
+
+        // For now, just destroy the enemy on collision.
+        scene.destroy_entity(enemy_entity);
+
+        // See if we should start spawning new enemies.
+        if enemy_manager.len() < MIN_ENEMY_COUNT {
+            alarm_manager.assign(scene.create_entity(), ENEMY_SPAWN_DELAY, spawn_enemy);
+        }
+
+        return;
+    }
+}
+
+mod random {
+    extern crate rand;
+
+    use self::rand::distributions::{IndependentSample, Range};
+    use self::rand::distributions::range::SampleRange;
+
+    pub fn range<T: SampleRange + PartialOrd>(min: T, max: T) -> T {
+        let between = Range::new(min, max);
+        let mut rng = rand::thread_rng();
+        between.ind_sample(&mut rng)
+    }
+}

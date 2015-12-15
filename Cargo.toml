@@ -11,3 +11,4 @@ crate-type = ["dylib", "rlib"]
 [dependencies]
 gunship = { version = "*", path = "gunship-rs", features = ["hotloading"] }
 loader  = { version = "*", path = "gunship-rs/lib/loader" }
+rand = "*"

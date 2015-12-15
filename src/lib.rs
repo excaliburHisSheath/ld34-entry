@@ -59,11 +59,13 @@ game_setup! {
             resource_count: 10,
         }),
         UnitManager => UnitManager::new(),
-        EnemyManager => EnemyManager::new()
+        EnemyManager => EnemyManager::new(),
+        BulletManager => BulletManager::new()
 
     systems:
         manager_update,
-        enemy_update
+        enemy_update,
+        bullet_update
 
     models:
         "meshes/cube.dae",
@@ -130,6 +132,7 @@ fn scene_reset(scene: &Scene) {
 
     // Register callbacks to patch things up after hotloading.
     collider_manager.register_callback(on_enemy_collision);
+    collider_manager.register_callback(bullet_collision);
     alarm_manager.register_callback(spawn_enemy);
     alarm_manager.register_callback(fire_turret);
 
@@ -343,11 +346,77 @@ fn fire_turret(scene: &Scene, turret_entity: Entity) {
     let mut transform_manager = scene.get_manager_mut::<TransformManager>();
     let enemy_manager = scene.get_manager::<EnemyManager>();
     let unit_manager = scene.get_manager::<UnitManager>();
+    let mesh_manager = scene.get_manager::<MeshManager>();
+    let bullet_manager = scene.get_manager::<BulletManager>();
+    let collider_manager = scene.get_manager::<ColliderManager>();
 
-    let mut turret = unit_manager.get_mut(turret_entity);
+    let mut turret = unit_manager.get_mut(turret_entity).unwrap();
+    let turret_position = transform_manager.get(turret_entity).position();
 
     // If the turret already has a target then shoot at that target. Unless that target is dead.
     // How do we get notified when the target is destroyed.
+    if let PlayerUnit::Turret { level: _, shoot_alarm: _, ref mut target } = *turret {
+        let maybe_target = {
+            let find_closest = || {
+                use std::f32;
+
+                let mut closest = None;
+                let mut closest_dist = f32::MAX;
+                for (_, enemy_entity) in enemy_manager.iter() {
+                    let enemy_transform = transform_manager.get(enemy_entity);
+                    let dist = (turret_position - enemy_transform.position()).magnitude();
+
+                    if dist < closest_dist {
+                        closest = Some(enemy_entity);
+                        closest_dist = dist;
+                    }
+                }
+
+                closest
+            };
+
+            match *target {
+                Some(entity) => {
+                    // Make sure target is still alive.
+                    if scene.is_alive(entity) {
+                        Some(entity)
+                    } else {
+                        // Fuck, we have to find a new entity.
+                        find_closest()
+                    }
+                },
+                None => {
+                    // Find closest enemy to use as target.
+                    find_closest()
+                }
+            }
+        };
+
+        if let Some(enemy_entity) = maybe_target {
+            // Make the bullet and shoot it.
+            let enemy_position = transform_manager.get(enemy_entity).position();
+
+            let bullet_entity = scene.create_entity();
+
+            let mut bullet_transform = transform_manager.assign(bullet_entity);
+            bullet_transform.set_position(turret_position);
+            bullet_transform.set_scale(Vector3::new(0.1, 0.1, 0.3));
+            bullet_transform.look_at(enemy_position, Vector3::up());
+            mesh_manager.assign(bullet_entity, "pCube1-lib");
+            bullet_manager.assign(bullet_entity, Bullet {
+                speed: 10.0,
+            });
+            collider_manager.assign(bullet_entity, Collider::Box {
+                offset: Vector3::zero(),
+                widths: Vector3::one(),
+            });
+            collider_manager.assign_callback(bullet_entity, bullet_collision);
+        }
+
+        *target = maybe_target;
+    } else {
+        panic!("Trying to shoot stuff from the player base");
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -356,6 +425,32 @@ struct Bullet {
 }
 
 type BulletManager = StructComponentManager<Bullet>;
+
+fn bullet_update(scene: &Scene, delta: f32) {
+    let transform_manager = scene.get_manager::<TransformManager>();
+    let bullet_manager = scene.get_manager::<BulletManager>();
+
+    for (bullet, bullet_entity) in bullet_manager.iter() {
+        let mut bullet_transform = transform_manager.get_mut(bullet_entity);
+        let forward = bullet_transform.forward();
+        bullet_transform.translate(forward * bullet.speed * delta);
+    }
+}
+
+fn bullet_collision(scene: &Scene, bullet_entity: Entity, others: &[Entity]) {
+    let enemy_manager = scene.get_manager::<EnemyManager>();
+    let mut game_manager = scene.get_manager_mut::<GameManager>();
+
+    for other in others.iter().cloned() {
+        if enemy_manager.get(other).is_some() {
+            scene.destroy_entity(other);
+            scene.destroy_entity(bullet_entity);
+
+            game_manager.resource_count += 1;
+            return;
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct Enemy;
